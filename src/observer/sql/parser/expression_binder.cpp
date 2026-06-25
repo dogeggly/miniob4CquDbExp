@@ -62,6 +62,10 @@ RC ExpressionBinder::bind_expression(unique_ptr<Expression> &expr, vector<unique
       return bind_aggregate_expression(expr, bound_expressions);
     } break;
 
+    case ExprType::UNBOUND_FUNCTION: {
+      return bind_unbound_function_expression(expr, bound_expressions);
+    } break;
+
     case ExprType::FIELD: {
       return bind_field_expression(expr, bound_expressions);
     } break;
@@ -445,5 +449,68 @@ RC ExpressionBinder::bind_aggregate_expression(
   }
 
   bound_expressions.emplace_back(std::move(aggregate_expr));
+  return RC::SUCCESS;
+}
+
+RC ExpressionBinder::bind_unbound_function_expression(
+    unique_ptr<Expression> &expr, vector<unique_ptr<Expression>> &bound_expressions)
+{
+  if (nullptr == expr) {
+    return RC::SUCCESS;
+  }
+
+  auto unbound_func_expr = static_cast<UnboundFunctionExpr *>(expr.get());
+  const char *function_name = unbound_func_expr->function_name();
+
+  // 检查是否为聚合函数（向后兼容）
+  AggregateExpr::Type aggregate_type;
+  RC                  rc = AggregateExpr::type_from_string(function_name, aggregate_type);
+  if (OB_SUCC(rc)) {
+    // 聚合函数：创建 UnboundAggregateExpr 并委托给 bind_aggregate_expression
+    unique_ptr<Expression> aggregate_child;
+    if (unbound_func_expr->children().size() == 1) {
+      aggregate_child = std::move(unbound_func_expr->children()[0]);
+    } else if (unbound_func_expr->children().empty()) {
+      // COUNT() 无参数 -> 视为 COUNT(1)
+      aggregate_child = make_unique<ValueExpr>(Value(1));
+    } else {
+      LOG_WARN("aggregate function '%s' does not accept %d arguments",
+               function_name, static_cast<int>(unbound_func_expr->children().size()));
+      return RC::INVALID_ARGUMENT;
+    }
+
+    unique_ptr<Expression> unbound_aggr =
+        make_unique<UnboundAggregateExpr>(function_name, std::move(aggregate_child));
+    unbound_aggr->set_name(unbound_func_expr->name());
+    return bind_aggregate_expression(unbound_aggr, bound_expressions);
+  }
+
+  // 检查是否为标量函数
+  FunctionExpr::Type func_type;
+  rc = FunctionExpr::type_from_string(function_name, func_type);
+  if (OB_FAIL(rc)) {
+    LOG_WARN("unknown function: %s", function_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 绑定所有子表达式
+  vector<unique_ptr<Expression>> bound_children;
+  for (auto &child : unbound_func_expr->children()) {
+    vector<unique_ptr<Expression>> child_bound;
+    rc = bind_expression(child, child_bound);
+    if (OB_FAIL(rc)) {
+      return rc;
+    }
+    if (child_bound.size() != 1) {
+      LOG_WARN("invalid children number for function expression: %d",
+               static_cast<int>(child_bound.size()));
+      return RC::INVALID_ARGUMENT;
+    }
+    bound_children.emplace_back(std::move(child_bound[0]));
+  }
+
+  auto func_expr = make_unique<FunctionExpr>(func_type, std::move(bound_children));
+  func_expr->set_name(unbound_func_expr->name());
+  bound_expressions.emplace_back(std::move(func_expr));
   return RC::SUCCESS;
 }

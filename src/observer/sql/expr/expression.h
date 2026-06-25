@@ -39,6 +39,7 @@ enum class ExprType
   STAR,                 ///< 星号，表示所有字段
   UNBOUND_FIELD,        ///< 未绑定的字段，需要在resolver阶段解析为FieldExpr
   UNBOUND_AGGREGATION,  ///< 未绑定的聚合函数，需要在resolver阶段解析为AggregateExpr
+  UNBOUND_FUNCTION,     ///< 未绑定的标量函数，需要在resolver阶段解析为FunctionExpr
 
   FIELD,        ///< 字段。在实际执行时，根据行数据内容提取对应字段的值
   VALUE,        ///< 常量值
@@ -47,6 +48,7 @@ enum class ExprType
   CONJUNCTION,  ///< 多个表达式使用同一种关系(AND或OR)来联结
   ARITHMETIC,   ///< 算术运算
   AGGREGATION,  ///< 聚合运算
+  FUNCTION,     ///< 标量函数（DISTANCE, STRING_TO_VECTOR, VECTOR_TO_STRING 等）
 };
 
 /**
@@ -527,4 +529,80 @@ public:
 private:
   Type                   aggregate_type_;
   unique_ptr<Expression> child_;
+};
+
+/**
+ * @brief 未绑定的标量函数表达式
+ * @ingroup Expression
+ * @details 在解析阶段创建，存储函数名和子表达式列表。
+ * 在绑定阶段根据函数名解析为具体的 FunctionExpr。
+ */
+class UnboundFunctionExpr : public Expression
+{
+public:
+  UnboundFunctionExpr(const char *function_name, vector<unique_ptr<Expression>> children);
+  UnboundFunctionExpr(const char *function_name, unique_ptr<Expression> child);
+  virtual ~UnboundFunctionExpr() = default;
+
+  ExprType type() const override { return ExprType::UNBOUND_FUNCTION; }
+
+  unique_ptr<Expression> copy() const override;
+
+  const char *function_name() const { return function_name_.c_str(); }
+
+  vector<unique_ptr<Expression>> &children() { return children_; }
+
+  RC       get_value(const Tuple &tuple, Value &value) const override { return RC::INTERNAL; }
+  AttrType value_type() const override { return AttrType::UNDEFINED; }
+
+private:
+  string                         function_name_;
+  vector<unique_ptr<Expression>> children_;
+};
+
+/**
+ * @brief 标量函数表达式
+ * @ingroup Expression
+ * @details 绑定后的标量函数，在运行时执行具体计算。
+ * 支持 DISTANCE（向量距离）、STRING_TO_VECTOR（字符串转向量）、VECTOR_TO_STRING（向量转字符串）。
+ */
+class FunctionExpr : public Expression
+{
+public:
+  enum class Type
+  {
+    DISTANCE,          ///< DISTANCE(vec1, vec2, method)
+    VECTOR_TO_STRING,  ///< VECTOR_TO_STRING(vec)
+    STRING_TO_VECTOR,  ///< STRING_TO_VECTOR(str)
+  };
+
+  FunctionExpr(Type type, vector<unique_ptr<Expression>> children);
+  virtual ~FunctionExpr() = default;
+
+  unique_ptr<Expression> copy() const override;
+  bool                    equal(const Expression &other) const override;
+
+  ExprType type() const override { return ExprType::FUNCTION; }
+  Type     function_type() const { return function_type_; }
+
+  AttrType value_type() const override;
+  int      value_length() const override;
+
+  RC get_value(const Tuple &tuple, Value &value) const override;
+  RC try_get_value(Value &value) const override;
+  RC get_column(Chunk &chunk, Column &column) override;
+
+  vector<unique_ptr<Expression>> &children() { return children_; }
+  const vector<unique_ptr<Expression>> &children() const { return children_; }
+
+  static RC type_from_string(const char *type_str, Type &type);
+
+private:
+  RC eval_distance(const Tuple &tuple, Value &result) const;
+  RC eval_string_to_vector(const Tuple &tuple, Value &result) const;
+  RC eval_vector_to_string(const Tuple &tuple, Value &result) const;
+
+private:
+  Type                           function_type_;
+  vector<unique_ptr<Expression>> children_;
 };

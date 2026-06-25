@@ -122,6 +122,61 @@ RC VectorType::set_value_from_str(Value &val, const string &data) const
   return RC::SUCCESS;
 }
 
+RC VectorType::cosine_distance(const float *a, const float *b, int dim, float &result)
+{
+  if (a == nullptr || b == nullptr || dim <= 0) {
+    return RC::INVALID_ARGUMENT;
+  }
+  float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+  for (int i = 0; i < dim; i++) {
+    dot += a[i] * b[i];
+    norm_a += a[i] * a[i];
+    norm_b += b[i] * b[i];
+  }
+  norm_a = std::sqrt(norm_a);
+  norm_b = std::sqrt(norm_b);
+  if (norm_a < 1e-8f || norm_b < 1e-8f) {
+    return RC::INVALID_ARGUMENT;
+  }
+  float similarity = dot / (norm_a * norm_b);
+  // Clamp to [-1, 1] to handle floating point errors
+  if (similarity > 1.0f) {
+    similarity = 1.0f;
+  }
+  if (similarity < -1.0f) {
+    similarity = -1.0f;
+  }
+  result = 1.0f - similarity;
+  return RC::SUCCESS;
+}
+
+RC VectorType::dot_product(const float *a, const float *b, int dim, float &result)
+{
+  if (a == nullptr || b == nullptr || dim <= 0) {
+    return RC::INVALID_ARGUMENT;
+  }
+  float dot = 0.0f;
+  for (int i = 0; i < dim; i++) {
+    dot += a[i] * b[i];
+  }
+  result = -dot;  // 取负，越小越相似
+  return RC::SUCCESS;
+}
+
+RC VectorType::euclidean_distance(const float *a, const float *b, int dim, float &result)
+{
+  if (a == nullptr || b == nullptr || dim <= 0) {
+    return RC::INVALID_ARGUMENT;
+  }
+  float sum = 0.0f;
+  for (int i = 0; i < dim; i++) {
+    float diff = a[i] - b[i];
+    sum += diff * diff;
+  }
+  result = sum;  // L2 平方，保持排序性
+  return RC::SUCCESS;
+}
+
 int VectorType::cast_cost(AttrType type)
 {
   if (type == AttrType::VECTORS) {

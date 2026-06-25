@@ -15,6 +15,8 @@ See the Mulan PSL v2 for more details. */
 #include "sql/expr/expression.h"
 #include "sql/expr/tuple.h"
 #include "sql/expr/arithmetic_operator.hpp"
+#include "common/type/vector_type.h"
+#include "common/type/attr_type.h"
 
 using namespace std;
 
@@ -627,4 +629,319 @@ RC AggregateExpr::type_from_string(const char *type_str, AggregateExpr::Type &ty
     rc = RC::INVALID_ARGUMENT;
   }
   return rc;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// UnboundFunctionExpr
+
+UnboundFunctionExpr::UnboundFunctionExpr(const char *function_name, vector<unique_ptr<Expression>> children)
+    : function_name_(function_name), children_(std::move(children))
+{}
+
+UnboundFunctionExpr::UnboundFunctionExpr(const char *function_name, unique_ptr<Expression> child)
+    : function_name_(function_name)
+{
+  children_.emplace_back(std::move(child));
+}
+
+unique_ptr<Expression> UnboundFunctionExpr::copy() const
+{
+  vector<unique_ptr<Expression>> children;
+  for (auto &child : children_) {
+    children.emplace_back(child->copy());
+  }
+  return make_unique<UnboundFunctionExpr>(function_name_.c_str(), std::move(children));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// FunctionExpr
+
+FunctionExpr::FunctionExpr(Type type, vector<unique_ptr<Expression>> children)
+    : function_type_(type), children_(std::move(children))
+{}
+
+unique_ptr<Expression> FunctionExpr::copy() const
+{
+  vector<unique_ptr<Expression>> children;
+  for (auto &child : children_) {
+    children.emplace_back(child->copy());
+  }
+  return make_unique<FunctionExpr>(function_type_, std::move(children));
+}
+
+bool FunctionExpr::equal(const Expression &other) const
+{
+  if (this == &other) {
+    return true;
+  }
+  if (other.type() != ExprType::FUNCTION) {
+    return false;
+  }
+  const auto &other_func = static_cast<const FunctionExpr &>(other);
+  if (function_type_ != other_func.function_type_) {
+    return false;
+  }
+  if (children_.size() != other_func.children_.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < children_.size(); i++) {
+    if (!children_[i]->equal(*other_func.children_[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+AttrType FunctionExpr::value_type() const
+{
+  switch (function_type_) {
+    case Type::DISTANCE:
+      return AttrType::FLOATS;
+    case Type::VECTOR_TO_STRING:
+      return AttrType::CHARS;
+    case Type::STRING_TO_VECTOR:
+      return AttrType::VECTORS;
+    default:
+      return AttrType::UNDEFINED;
+  }
+}
+
+int FunctionExpr::value_length() const
+{
+  switch (function_type_) {
+    case Type::DISTANCE:
+      return static_cast<int>(sizeof(float));
+    case Type::VECTOR_TO_STRING:
+      return -1;  // 变长字符串
+    case Type::STRING_TO_VECTOR:
+      return VectorType::DEFAULT_DIM * static_cast<int>(sizeof(float));
+    default:
+      return -1;
+  }
+}
+
+RC FunctionExpr::type_from_string(const char *type_str, FunctionExpr::Type &type)
+{
+  RC rc = RC::SUCCESS;
+  if (0 == strcasecmp(type_str, "distance")) {
+    type = Type::DISTANCE;
+  } else if (0 == strcasecmp(type_str, "string_to_vector")) {
+    type = Type::STRING_TO_VECTOR;
+  } else if (0 == strcasecmp(type_str, "vector_to_string")) {
+    type = Type::VECTOR_TO_STRING;
+  } else {
+    rc = RC::INVALID_ARGUMENT;
+  }
+  return rc;
+}
+
+RC FunctionExpr::get_value(const Tuple &tuple, Value &value) const
+{
+  switch (function_type_) {
+    case Type::DISTANCE:
+      return eval_distance(tuple, value);
+    case Type::STRING_TO_VECTOR:
+      return eval_string_to_vector(tuple, value);
+    case Type::VECTOR_TO_STRING:
+      return eval_vector_to_string(tuple, value);
+    default:
+      LOG_WARN("unknown function type: %d", static_cast<int>(function_type_));
+      return RC::INTERNAL;
+  }
+}
+
+RC FunctionExpr::try_get_value(Value &value) const
+{
+  // 获取所有子表达式的常量值
+  vector<Value> child_values;
+  for (auto &child : children_) {
+    Value child_val;
+    RC    rc = child->try_get_value(child_val);
+    if (OB_FAIL(rc)) {
+      return rc;
+    }
+    child_values.push_back(std::move(child_val));
+  }
+
+  switch (function_type_) {
+    case Type::DISTANCE: {
+      if (child_values.size() != 3) {
+        return RC::INVALID_ARGUMENT;
+      }
+      if (child_values[0].attr_type() != AttrType::VECTORS || child_values[1].attr_type() != AttrType::VECTORS) {
+        return RC::INVALID_ARGUMENT;
+      }
+      if (child_values[0].length() != child_values[1].length()) {
+        return RC::INVALID_ARGUMENT;
+      }
+
+      const float *data1     = reinterpret_cast<const float *>(child_values[0].data());
+      const float *data2     = reinterpret_cast<const float *>(child_values[1].data());
+      int          dim       = child_values[0].length();
+      string       method_str = child_values[2].get_string();
+      float        dist      = 0.0f;
+
+      RC rc;
+      if (0 == strcasecmp(method_str.c_str(), "cosine")) {
+        rc = VectorType::cosine_distance(data1, data2, dim, dist);
+      } else if (0 == strcasecmp(method_str.c_str(), "dot")) {
+        rc = VectorType::dot_product(data1, data2, dim, dist);
+      } else if (0 == strcasecmp(method_str.c_str(), "euclidean") || 0 == strcasecmp(method_str.c_str(), "l2")) {
+        rc = VectorType::euclidean_distance(data1, data2, dim, dist);
+      } else {
+        return RC::INVALID_ARGUMENT;
+      }
+      if (OB_FAIL(rc)) {
+        return rc;
+      }
+      value.set_float(dist);
+      return RC::SUCCESS;
+    }
+
+    case Type::STRING_TO_VECTOR: {
+      if (child_values.size() != 1) {
+        return RC::INVALID_ARGUMENT;
+      }
+      string str = child_values[0].get_string();
+      value.set_type(AttrType::VECTORS);
+      return DataType::type_instance(AttrType::VECTORS)->set_value_from_str(value, str);
+    }
+
+    case Type::VECTOR_TO_STRING: {
+      if (child_values.size() != 1) {
+        return RC::INVALID_ARGUMENT;
+      }
+      if (child_values[0].attr_type() != AttrType::VECTORS) {
+        return RC::INVALID_ARGUMENT;
+      }
+      string out;
+      RC     rc = DataType::type_instance(AttrType::VECTORS)->to_string(child_values[0], out);
+      if (OB_FAIL(rc)) {
+        return rc;
+      }
+      value.set_string(out.c_str(), static_cast<int>(out.size()));
+      return RC::SUCCESS;
+    }
+
+    default:
+      return RC::INTERNAL;
+  }
+}
+
+RC FunctionExpr::get_column(Chunk &chunk, Column &column)
+{
+  // 标量函数暂不支持向量化执行，返回 UNIMPLEMENTED
+  return RC::UNIMPLEMENTED;
+}
+
+RC FunctionExpr::eval_distance(const Tuple &tuple, Value &result) const
+{
+  if (children_.size() != 3) {
+    LOG_WARN("DISTANCE requires exactly 3 arguments, got %d", static_cast<int>(children_.size()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 求值向量1 (参数0)
+  Value vec1;
+  RC    rc = children_[0]->get_value(tuple, vec1);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+  if (vec1.attr_type() != AttrType::VECTORS) {
+    LOG_WARN("DISTANCE first argument must be VECTOR, got %s", attr_type_to_string(vec1.attr_type()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 求值向量2 (参数1)
+  Value vec2;
+  rc = children_[1]->get_value(tuple, vec2);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+  if (vec2.attr_type() != AttrType::VECTORS) {
+    LOG_WARN("DISTANCE second argument must be VECTOR, got %s", attr_type_to_string(vec2.attr_type()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 校验维度匹配
+  if (vec1.length() != vec2.length()) {
+    LOG_WARN("DISTANCE dimension mismatch: %d vs %d", vec1.length(), vec2.length());
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 求值距离方法字符串 (参数2)
+  Value method_val;
+  rc = children_[2]->get_value(tuple, method_val);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+  string method_str = method_val.get_string();
+
+  const float *data1 = reinterpret_cast<const float *>(vec1.data());
+  const float *data2 = reinterpret_cast<const float *>(vec2.data());
+  int          dim   = vec1.length();
+  float        dist  = 0.0f;
+
+  if (0 == strcasecmp(method_str.c_str(), "cosine")) {
+    rc = VectorType::cosine_distance(data1, data2, dim, dist);
+  } else if (0 == strcasecmp(method_str.c_str(), "dot")) {
+    rc = VectorType::dot_product(data1, data2, dim, dist);
+  } else if (0 == strcasecmp(method_str.c_str(), "euclidean") || 0 == strcasecmp(method_str.c_str(), "l2")) {
+    rc = VectorType::euclidean_distance(data1, data2, dim, dist);
+  } else {
+    LOG_WARN("DISTANCE unsupported method: %s", method_str.c_str());
+    return RC::INVALID_ARGUMENT;
+  }
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+
+  result.set_float(dist);
+  return RC::SUCCESS;
+}
+
+RC FunctionExpr::eval_string_to_vector(const Tuple &tuple, Value &result) const
+{
+  if (children_.size() != 1) {
+    LOG_WARN("STRING_TO_VECTOR requires exactly 1 argument, got %d", static_cast<int>(children_.size()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Value str_val;
+  RC    rc = children_[0]->get_value(tuple, str_val);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+
+  string str = str_val.get_string();
+  result.set_type(AttrType::VECTORS);
+  return DataType::type_instance(AttrType::VECTORS)->set_value_from_str(result, str);
+}
+
+RC FunctionExpr::eval_vector_to_string(const Tuple &tuple, Value &result) const
+{
+  if (children_.size() != 1) {
+    LOG_WARN("VECTOR_TO_STRING requires exactly 1 argument, got %d", static_cast<int>(children_.size()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Value vec_val;
+  RC    rc = children_[0]->get_value(tuple, vec_val);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+
+  if (vec_val.attr_type() != AttrType::VECTORS) {
+    LOG_WARN("VECTOR_TO_STRING argument must be VECTOR, got %s", attr_type_to_string(vec_val.attr_type()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  string out;
+  rc = DataType::type_instance(AttrType::VECTORS)->to_string(vec_val, out);
+  if (OB_FAIL(rc)) {
+    return rc;
+  }
+
+  result.set_string(out.c_str(), static_cast<int>(out.size()));
+  return RC::SUCCESS;
 }

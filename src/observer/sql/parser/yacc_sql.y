@@ -41,16 +41,6 @@ ArithmeticExpr *create_arithmetic_expression(ArithmeticExpr::Type type,
   return expr;
 }
 
-UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
-                                           Expression *child,
-                                           const char *sql_string,
-                                           YYLTYPE *llocp)
-{
-  UnboundAggregateExpr *expr = new UnboundAggregateExpr(aggregate_name, child);
-  expr->set_name(token_name(sql_string, llocp));
-  return expr;
-}
-
 %}
 
 %define api.pure full
@@ -176,7 +166,7 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 %type <key_list>            attr_list
 %type <relation_list>       rel_list
 %type <expression>          expression
-%type <expression>          aggregate_expression
+%type <expression>          function_expression
 %type <expression_list>     expression_list
 %type <expression_list>     group_by
 %type <cstring>             fields_terminated_by
@@ -466,6 +456,8 @@ value:
       free(tmp);
     }
     | ID LBRACE SSS RBRACE {
+      // STRING_TO_VECTOR 在 INSERT VALUES 中的兼容处理
+      // 在 SELECT/CALC 等表达式上下文中由 function_expression 规则统一处理
       if (0 == strcasecmp($1, "STRING_TO_VECTOR")) {
         char *tmp = common::substr($3, 1, strlen($3) - 2);
         Value *val = new Value();
@@ -603,14 +595,35 @@ expression:
       $$->set_name(token_name(sql_string, &@$));
       delete $1;
     }
-    | aggregate_expression {
+    | function_expression {
       $$ = $1;
     }
     ;
 
-aggregate_expression:
+function_expression:
     ID LBRACE expression RBRACE {
-      $$ = create_aggregate_expression($1, $3, sql_string, &@$);
+      vector<unique_ptr<Expression>> children;
+      children.emplace_back($3);
+      UnboundFunctionExpr *expr = new UnboundFunctionExpr($1, std::move(children));
+      expr->set_name(token_name(sql_string, &@$));
+      $$ = expr;
+    }
+    | ID LBRACE expression COMMA expression RBRACE {
+      vector<unique_ptr<Expression>> children;
+      children.emplace_back($3);
+      children.emplace_back($5);
+      UnboundFunctionExpr *expr = new UnboundFunctionExpr($1, std::move(children));
+      expr->set_name(token_name(sql_string, &@$));
+      $$ = expr;
+    }
+    | ID LBRACE expression COMMA expression COMMA expression RBRACE {
+      vector<unique_ptr<Expression>> children;
+      children.emplace_back($3);
+      children.emplace_back($5);
+      children.emplace_back($7);
+      UnboundFunctionExpr *expr = new UnboundFunctionExpr($1, std::move(children));
+      expr->set_name(token_name(sql_string, &@$));
+      $$ = expr;
     }
     ;
 

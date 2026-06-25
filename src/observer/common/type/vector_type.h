@@ -42,6 +42,17 @@ public:
   /// 隐式转换代价：仅支持 VECTOR -> VECTOR
   int cast_cost(AttrType type) override;
 
+  // --- 距离计算 ---
+
+  /// 计算余弦距离: 1 - cosine_similarity。零向量返回 INVALID_ARGUMENT
+  static RC cosine_distance(const float *a, const float *b, int dim, float &result);
+
+  /// 计算点积距离: -sum(a[i] * b[i])，越小越相似
+  static RC dot_product(const float *a, const float *b, int dim, float &result);
+
+  /// 计算欧几里得距离平方: sum((a[i] - b[i])^2)，保持排序不变
+  static RC euclidean_distance(const float *a, const float *b, int dim, float &result);
+
   /// 默认向量维度
   static constexpr int DEFAULT_DIM = 2048;
   /// 最大向量维度
