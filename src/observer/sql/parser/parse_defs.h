@@ -76,6 +76,16 @@ struct ConditionSqlNode
 };
 
 /**
+ * @brief 描述一个ORDER BY子句中的排序项
+ * @ingroup SQLParser
+ */
+struct OrderBySqlNode
+{
+  unique_ptr<Expression> expression;  ///< 排序表达式
+  bool                    is_asc;     ///< true为升序(ASC)，false为降序(DESC)
+};
+
+/**
  * @brief 描述一个select语句
  * @ingroup SQLParser
  * @details 一个正常的select语句描述起来比这个要复杂很多，这里做了简化。
@@ -92,6 +102,7 @@ struct SelectSqlNode
   vector<string>                 relations;    ///< 查询的表
   vector<ConditionSqlNode>       conditions;   ///< 查询条件，使用AND串联起来多个条件
   vector<unique_ptr<Expression>> group_by;     ///< group by clause
+  vector<OrderBySqlNode>         order_by;     ///< order by clause
 };
 
 /**

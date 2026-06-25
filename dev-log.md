@@ -233,3 +233,147 @@ bash test/vector_function_test.sh --rebuild
 
 ### `src/observer/net/plain_communicator.cpp` — 修改
 修复了 CALC 执行时错误被静默吞掉的框架缺陷：`write_result_internal()` 在 header 已发送后若 `write_tuple_result()` 返回错误，原代码仅 `return rc` 而不调用 `write_state()`，导致客户端收到 header 但没有 FAILURE 消息。改为调用 `sql_result->set_return_code(rc)` 后 `write_state()`，使 CALC 运行时错误正确输出错误信息。
+
+# 三、向量距离精确查询与排序实现日志
+
+## 概述
+
+在 MiniOB 中实现了向量距离精确查询与排序功能，包括：
+- 在 SELECT 语句中使用 DISTANCE 函数计算向量距离
+- 自动维度校验（表字段维度 vs 查询向量维度）
+- AS 别名支持（为列和 DISTANCE 结果指定别名）
+- ORDER BY 排序支持（对原始字段、DISTANCE 结果及别名进行排序）
+
+## 架构设计
+
+整体管线（SELECT with ORDER BY）：
+
+```
+ProjectPhysicalOperator (计算 SELECT 表达式)
+  |
+OrderByPhysicalOperator (排序原始元组)
+  |
+... (表扫描 / 谓词过滤 / GROUP BY)
+```
+
+ORDER BY 算子位于投影算子和表扫描之间，对原始元组按排序表达式求值后排序，投影算子对排序后的元组计算 SELECT 表达式。
+
+别名解析在绑定阶段进行：ORDER BY 子句中引用 SELECT 别名的表达式会被替换为对应的 SELECT 表达式副本。
+
+## 改动文件清单
+
+### 1. `src/observer/sql/parser/lex_sql.l` — 修改
+- 添加 `ORDER`、`ASC`、`DESC`、`AS` 四个关键词 token
+
+### 2. `src/observer/sql/parser/yacc_sql.y` — 修改
+- **token 声明**: 添加 `ORDER`、`ASC`、`DESC`、`AS`
+- **union 新增类型**: `vector<OrderBySqlNode> *` (order_by_list)、`OrderBySqlNode *` (order_by_item)
+- **类型声明**: 新增 `opt_order_by`、`order_by`、`order_by_list`、`order_by_item`、`opt_asc_desc` 的 `%type`
+- **select_stmt 规则**: 追加 `opt_order_by` 子句，将解析到的 `order_by` 数据移入 `SelectSqlNode`
+- **expression_list → expression_as**: 引入 `expression_as` 中间规则，支持 `expression AS ID` 语法
+- **expression_as 规则**: `expression AS ID` 产生式将表达式的名称设置为别名
+- **opt_order_by 规则**: 可选子句，`ORDER BY order_by_list` 或空
+- **order_by_list 规则**: 一个或多个 `order_by_item`，逗号分隔
+- **order_by_item 规则**: `expression opt_asc_desc`，创建 `OrderBySqlNode`
+- **opt_asc_desc 规则**: 空（默认 ASC）、`ASC`、`DESC`
+
+### 3. `src/observer/sql/parser/parse_defs.h` — 修改
+- 新增 `OrderBySqlNode` 结构体：包含 `unique_ptr<Expression> expression` 和 `bool is_asc`
+- `SelectSqlNode` 新增 `vector<OrderBySqlNode> order_by` 字段
+
+### 4. `src/observer/sql/stmt/select_stmt.h` — 修改
+- 新增 `order_by()` 和 `order_by_asc()` 访问器
+- 新增私有成员 `vector<unique_ptr<Expression>> order_by_` 和 `vector<bool> order_by_asc_`
+
+### 5. `src/observer/sql/stmt/select_stmt.cpp` — 修改
+- **别名映射构建**: 在绑定 SELECT 表达式后，构建 `alias → expression*` 的映射表
+- **ORDER BY 绑定**:
+  1. 遍历每个 ORDER BY 项
+  2. 若为无表名的 `UnboundFieldExpr`，检查其字段名是否匹配 SELECT 别名
+  3. 若匹配，用 SELECT 表达式的副本替换（`expression->copy()`）
+  4. 否则，正常走 `ExpressionBinder::bind_expression()` 绑定
+  5. 记录每个表达式对应的 ASC/DESC 标志
+
+### 6. `src/observer/sql/operator/logical_operator.h` — 修改
+- `LogicalOperatorType` 枚举新增 `ORDER_BY`
+
+### 7. `src/observer/sql/operator/physical_operator.h` — 修改
+- `PhysicalOperatorType` 枚举新增 `ORDER_BY`
+
+### 8. `src/observer/sql/operator/order_by_logical_operator.h` — 新建
+- `OrderByLogicalOperator` 类：存储排序表达式于基类 `expressions_`（供表达式改写器遍历），ASC/DESC 标志单独存储
+
+### 9. `src/observer/sql/operator/order_by_logical_operator.cpp` — 新建
+- 构造函数：将 ORDER BY 表达式移入基类 `expressions_`
+
+### 10. `src/observer/sql/operator/order_by_physical_operator.h` — 新建
+- `OrderByPhysicalOperator` 类：
+  - `open()`: 打开子算子，读取全部元组，求值排序键，排序
+  - `next()`: 按排序顺序逐行返回
+  - `current_tuple()`: 返回当前 ValueListTuple 的指针
+
+### 11. `src/observer/sql/operator/order_by_physical_operator.cpp` — 新建
+- **`open()`**:
+  1. 调用子算子 `open()`
+  2. 循环调用 `next()` 读取全部元组，转换为 `ValueListTuple` 存储
+  3. 对每个元组求值所有 ORDER BY 表达式，得到排序键向量
+  4. 使用 `std::sort` 对索引按排序键比较排序
+  5. 按排序后索引重排元组
+- **排序比较器**: 逐列比较排序键，ASC 模式 `cmp < 0`，DESC 模式 `cmp > 0`
+- **错误处理**: 表达式求值失败时使用 NULL 类型占位（排在最后）
+- **`next()`**: 递增索引，超出范围返回 `RECORD_EOF`
+- **`close()`**: 清空缓存，关闭子算子
+
+### 12. `src/observer/sql/optimizer/logical_plan_generator.cpp` — 修改
+- 包含 `order_by_logical_operator.h`
+- `create_plan(SelectStmt*)`: 在 GROUP BY 和 PROJECT 之间插入 ORDER BY 逻辑算子
+  - 若 `order_by` 非空，创建 `OrderByLogicalOperator`，将当前算子链作为其子节点
+  - 然后创建 `ProjectLogicalOperator` 在 ORDER BY 之上
+
+### 13. `src/observer/sql/optimizer/physical_plan_generator.h` — 修改
+- 前向声明 `OrderByLogicalOperator`
+- 新增 `create_plan(OrderByLogicalOperator &, ...)` 方法声明
+
+### 14. `src/observer/sql/optimizer/physical_plan_generator.cpp` — 修改
+- 包含 `order_by_logical_operator.h` 和 `order_by_physical_operator.h`
+- `create()` 分发新增 `case LogicalOperatorType::ORDER_BY`
+- 新增 `create_plan(OrderByLogicalOperator &, ...)`: 创建子物理算子 → 复制 ORDER BY 表达式 → 创建 `OrderByPhysicalOperator`
+
+### 15. `src/observer/sql/operator/logical_operator.cpp` — 修改
+- `can_generate_vectorized_operator()` 新增 `case LogicalOperatorType::ORDER_BY`: 返回 false（ORDER BY 暂不使用向量化执行）
+
+## 功能支持范围
+
+| 功能 | 支持情况 |
+|------|---------|
+| `SELECT DISTANCE(v, '[...]', 'cosine') FROM t` | ✅ |
+| DISTANCE 维度自动校验（表字段 vs 查询向量） | ✅ (eval_distance 中已有) |
+| `SELECT expr AS alias FROM t` | ✅ |
+| `SELECT DISTANCE(...) AS dist FROM t` | ✅ |
+| `ORDER BY col ASC` | ✅ |
+| `ORDER BY col DESC` | ✅ |
+| `ORDER BY DISTANCE(v, '[...]', 'cosine')` | ✅ |
+| `ORDER BY alias` (引用 SELECT 别名) | ✅ |
+| 多列排序 `ORDER BY a ASC, b DESC` | ✅ |
+| `SELECT * FROM t ORDER BY col` | ✅ |
+| CALC 中使用 AS 别名 | ✅ |
+| ORDER BY 与 GROUP BY 联合使用 | ✅ |
+| ORDER BY 与 WHERE 联合使用 | ✅ |
+| 向量化执行 ORDER BY | ❌ 暂不支持 |
+
+## 测试
+
+功能测试脚本位于 `test/vector_distance_sort_test.sh`，覆盖精确距离查询、维度校验、AS 别名、ORDER BY 排序（基础字段/ DISTANCE 表达式/别名/多列）、GROUP BY + ORDER BY 联合使用以及错误路径测试。
+
+```bash
+# 在 Docker 容器的 /workspace/miniob 目录下运行，完成编译并测试
+bash test/vector_distance_sort_test.sh --rebuild
+```
+
+脚本通过 TCP plain 协议与 observer 通信，启动前会清理旧数据和端口残留进程，每次运行均为干净环境。
+
+## 已知问题 / 待完成
+
+1. **ORDER BY 不支持向量化执行**: `can_generate_vectorized_operator` 返回 false，ORDER BY 始终使用逐行模式
+2. **ORDER BY 全量内存排序**: 当前实现将全部元组读入内存后排序，大数据量时可能导致内存不足
+3. **表达式求值失败处理**: 排序键求值失败时使用 NULL 占位，可能影响排序结果的预期行为

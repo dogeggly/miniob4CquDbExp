@@ -100,6 +100,54 @@ RC SelectStmt::create(Db *db, SelectSqlNode &select_sql, Stmt *&stmt)
     return rc;
   }
 
+  // build alias map from SELECT expressions for ORDER BY resolution
+  unordered_map<string, unique_ptr<Expression> *> alias_map;
+  for (size_t i = 0; i < bound_expressions.size(); i++) {
+    const char *name = bound_expressions[i]->name();
+    if (name != nullptr && strlen(name) > 0) {
+      alias_map[name] = &bound_expressions[i];
+    }
+  }
+
+  // bind ORDER BY expressions
+  vector<unique_ptr<Expression>> order_by_expressions;
+  vector<bool>                   order_by_asc;
+  for (auto &order_item : select_sql.order_by) {
+    bool matched_alias = false;
+    if (order_item.expression->type() == ExprType::UNBOUND_FIELD) {
+      auto       unbound    = static_cast<UnboundFieldExpr *>(order_item.expression.get());
+      const char *table_name = unbound->table_name();
+      const char *field_name = unbound->field_name();
+
+      // only match aliases when no explicit table name is given
+      if (common::is_blank(table_name)) {
+        auto it = alias_map.find(field_name);
+        if (it != alias_map.end()) {
+          // replace with a copy of the SELECT expression
+          order_by_expressions.emplace_back((*it->second)->copy());
+          order_by_asc.push_back(order_item.is_asc);
+          matched_alias = true;
+        }
+      }
+    }
+
+    if (!matched_alias) {
+      // normal binding against table context
+      RC rc = expression_binder.bind_expression(order_item.expression, order_by_expressions);
+      if (OB_FAIL(rc)) {
+        LOG_INFO("bind order by expression failed. rc=%s", strrc(rc));
+        if (filter_stmt != nullptr) {
+          delete filter_stmt;
+        }
+        return rc;
+      }
+      // each ORDER BY item should produce exactly one expression after binding
+      while (order_by_asc.size() < order_by_expressions.size()) {
+        order_by_asc.push_back(order_item.is_asc);
+      }
+    }
+  }
+
   // everything alright
   SelectStmt *select_stmt = new SelectStmt();
 
@@ -107,6 +155,8 @@ RC SelectStmt::create(Db *db, SelectSqlNode &select_sql, Stmt *&stmt)
   select_stmt->query_expressions_.swap(bound_expressions);
   select_stmt->filter_stmt_ = filter_stmt;
   select_stmt->group_by_.swap(group_by_expressions);
+  select_stmt->order_by_.swap(order_by_expressions);
+  select_stmt->order_by_asc_ = std::move(order_by_asc);
   stmt                      = select_stmt;
   return RC::SUCCESS;
 }
