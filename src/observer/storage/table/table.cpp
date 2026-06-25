@@ -228,6 +228,19 @@ RC Table::make_record(int value_num, const Value *values, Record &record)
   for (int i = 0; i < value_num && OB_SUCC(rc); i++) {
     const FieldMeta *field = table_meta_.field(i + normal_field_start_index);
     const Value &    value = values[i];
+
+    // VECTOR 维度校验：插入向量的维度必须与字段定义一致
+    if (field->type() == AttrType::VECTORS && value.attr_type() == AttrType::VECTORS) {
+      int field_dim = field->len() / static_cast<int>(sizeof(float));
+      int value_dim = value.length();
+      if (field_dim != value_dim) {
+        LOG_WARN("vector dimension mismatch. table name:%s, field name:%s, expected dim:%d, got dim:%d",
+            table_meta_.name(), field->name(), field_dim, value_dim);
+        rc = RC::INVALID_ARGUMENT;
+        break;
+      }
+    }
+
     if (field->type() != value.attr_type()) {
       Value real_value;
       rc = Value::cast_to(value, field->type(), real_value);

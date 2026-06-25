@@ -205,6 +205,14 @@ RC LogicalPlanGenerator::create_plan(FilterStmt *filter_stmt, unique_ptr<Logical
       }
     }
 
+    // VECTOR 类型比较限制：只支持等值比较(=, !=)，不支持大小比较
+    if (left->value_type() == AttrType::VECTORS || right->value_type() == AttrType::VECTORS) {
+      if (filter_unit->comp() != EQUAL_TO && filter_unit->comp() != NOT_EQUAL) {
+        LOG_WARN("VECTOR type only supports equality comparison (=, !=), got comp=%d", filter_unit->comp());
+        return RC::UNSUPPORTED;
+      }
+    }
+
     ComparisonExpr *cmp_expr = new ComparisonExpr(filter_unit->comp(), std::move(left), std::move(right));
     cmp_exprs.emplace_back(cmp_expr);
   }

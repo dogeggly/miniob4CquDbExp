@@ -25,6 +25,10 @@ docs/book
 **/__pycache__
 #*#
 
+# runtime artifacts
+miniob/
+observer.log*
+
 # ignore generated files
 src/observer/sql/parser/lex_sql.cpp
 src/observer/sql/parser/lex_sql.h

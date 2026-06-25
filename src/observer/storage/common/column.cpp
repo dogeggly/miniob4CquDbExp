@@ -68,7 +68,12 @@ void Column::init(const Value &value, size_t size)
 {
   reset();
   attr_type_ = value.attr_type();
-  attr_len_  = value.length();
+  if (attr_type_ == AttrType::VECTORS) {
+    // VECTOR: length_ 是维度，attr_len_ 需要是字节长度
+    attr_len_ = value.length() * static_cast<int>(sizeof(float));
+  } else {
+    attr_len_ = value.length();
+  }
   if (attr_len_ == 0) {
     data_      = new char[1];
     data_[0] = '\0';
@@ -129,10 +134,13 @@ RC Column::append_value(const Value &value)
     return RC::INTERNAL;
   }
 
-  size_t total_bytes = std::min(value.length(), attr_len_);
+  int  value_byte_len = (attr_type_ == AttrType::VECTORS)
+                             ? value.length() * static_cast<int>(sizeof(float))
+                             : value.length();
+  size_t total_bytes = std::min(static_cast<size_t>(value_byte_len), static_cast<size_t>(attr_len_));
   memcpy(data_ + count_ * attr_len_, value.data(), total_bytes);
-  if (total_bytes < attr_len_)
-    data_[count_ * attr_len_ + total_bytes] = 0;
+  if (total_bytes < static_cast<size_t>(attr_len_))
+    memset(data_ + count_ * attr_len_ + total_bytes, 0, attr_len_ - total_bytes);
 
   count_ += 1;
   return RC::SUCCESS;

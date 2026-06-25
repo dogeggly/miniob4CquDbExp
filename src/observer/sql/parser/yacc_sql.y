@@ -7,6 +7,7 @@
 
 #include "common/log/log.h"
 #include "common/lang/string.h"
+#include "common/type/data_type.h"
 #include "sql/parser/parse_defs.h"
 #include "sql/parser/yacc_sql.hpp"
 #include "sql/parser/lex_sql.h"
@@ -358,7 +359,26 @@ attr_def_list:
     ;
     
 attr_def:
-    ID type LBRACE number RBRACE 
+    ID VECTOR_T LBRACE number RBRACE
+    {
+      int dim = $4;
+      if (dim <= 0 || dim > 16383) {
+        yyerror(&@$, sql_string, sql_result, scanner, "vector dimension must be between 1 and 16383");
+        YYERROR;
+      }
+      $$ = new AttrInfoSqlNode;
+      $$->type = AttrType::VECTORS;
+      $$->name = $1;
+      $$->length = dim * static_cast<int>(sizeof(float));
+    }
+    | ID VECTOR_T
+    {
+      $$ = new AttrInfoSqlNode;
+      $$->type = AttrType::VECTORS;
+      $$->name = $1;
+      $$->length = 2048 * static_cast<int>(sizeof(float));
+    }
+    | ID type LBRACE number RBRACE
     {
       $$ = new AttrInfoSqlNode;
       $$->type = (AttrType)$2;
@@ -380,7 +400,6 @@ type:
     INT_T      { $$ = static_cast<int>(AttrType::INTS); }
     | STRING_T { $$ = static_cast<int>(AttrType::CHARS); }
     | FLOAT_T  { $$ = static_cast<int>(AttrType::FLOATS); }
-    | VECTOR_T { $$ = static_cast<int>(AttrType::VECTORS); }
     ;
 primary_key:
     /* empty */
@@ -445,6 +464,24 @@ value:
       char *tmp = common::substr($1,1,strlen($1)-2);
       $$ = new Value(tmp);
       free(tmp);
+    }
+    | ID LBRACE SSS RBRACE {
+      if (0 == strcasecmp($1, "STRING_TO_VECTOR")) {
+        char *tmp = common::substr($3, 1, strlen($3) - 2);
+        Value *val = new Value();
+        val->set_type(AttrType::VECTORS);
+        RC rc = DataType::type_instance(AttrType::VECTORS)->set_value_from_str(*val, tmp);
+        free(tmp);
+        if (OB_FAIL(rc)) {
+          delete val;
+          yyerror(&@$, sql_string, sql_result, scanner, "invalid vector literal, expected format: '[1,2,3]'");
+          YYERROR;
+        }
+        $$ = val;
+      } else {
+        yyerror(&@$, sql_string, sql_result, scanner, "unsupported function in value context");
+        YYERROR;
+      }
     }
     ;
 storage_format:
