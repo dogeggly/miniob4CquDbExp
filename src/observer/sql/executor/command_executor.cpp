@@ -33,7 +33,8 @@ RC CommandExecutor::execute(SQLStageEvent *sql_event)
 
   RC rc = RC::SUCCESS;
   switch (stmt->type()) {
-    case StmtType::CREATE_INDEX: {
+    case StmtType::CREATE_INDEX:
+    case StmtType::CREATE_VECTOR_INDEX: {
       CreateIndexExecutor executor;
       rc = executor.execute(sql_event);
     } break;

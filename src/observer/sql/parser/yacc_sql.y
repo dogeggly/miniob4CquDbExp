@@ -111,6 +111,8 @@ ArithmeticExpr *create_arithmetic_expression(ArithmeticExpr::Type type,
         ORDER
         ASC
         AS
+        WITH
+        LIMIT
 
 /** union 中定义各种数据类型，真实生成的代码也是union类型，所以不能有非POD类型的数据 **/
 %union {
@@ -178,6 +180,7 @@ ArithmeticExpr *create_arithmetic_expression(ArithmeticExpr::Type type,
 %type <expression_list>     group_by
 %type <order_by_list>       order_by_list
 %type <order_by_list>       opt_order_by
+%type <number>               opt_limit
 %type <order_by_item>       order_by_item
 %type <number>              opt_asc_desc
 %type <expression>          expression_as
@@ -194,6 +197,8 @@ ArithmeticExpr *create_arithmetic_expression(ArithmeticExpr::Type type,
 %type <sql_node>            show_tables_stmt
 %type <sql_node>            desc_table_stmt
 %type <sql_node>            create_index_stmt
+%type <sql_node>            create_vector_index_stmt
+%type <key_list>            with_option_list
 %type <sql_node>            drop_index_stmt
 %type <sql_node>            sync_stmt
 %type <sql_node>            begin_stmt
@@ -232,6 +237,7 @@ command_wrapper:
   | show_tables_stmt
   | desc_table_stmt
   | create_index_stmt
+  | create_vector_index_stmt
   | drop_index_stmt
   | sync_stmt
   | begin_stmt
@@ -313,6 +319,78 @@ create_index_stmt:    /*create index 语句的语法解析树*/
       create_index.index_name = $3;
       create_index.relation_name = $5;
       create_index.attribute_name = $7;
+    }
+    ;
+
+create_vector_index_stmt:    /*create vector index 语句的语法解析树*/
+    CREATE VECTOR_T INDEX ID ON ID LBRACE ID RBRACE
+    {
+      $$ = new ParsedSqlNode(SCF_CREATE_VECTOR_INDEX);
+      CreateIndexSqlNode &create_index = $$->create_index;
+      create_index.index_name = $4;
+      create_index.relation_name = $6;
+      create_index.attribute_name = $8;
+    }
+    | CREATE VECTOR_T INDEX ID ON ID LBRACE ID RBRACE WITH LBRACE with_option_list RBRACE
+    {
+      $$ = new ParsedSqlNode(SCF_CREATE_VECTOR_INDEX);
+      CreateIndexSqlNode &create_index = $$->create_index;
+      create_index.index_name = $4;
+      create_index.relation_name = $6;
+      create_index.attribute_name = $8;
+      // 解析 with_option_list 中的选项
+      if ($12 != nullptr) {
+        for (const string &opt : *$12) {
+          size_t eq = opt.find('=');
+          if (eq != string::npos) {
+            string key = opt.substr(0, eq);
+            string val = opt.substr(eq + 1);
+            if (key == "distance") {
+              create_index.distance_method = val;
+            } else if (key == "type") {
+              create_index.index_type_str = val;
+            } else if (key == "lists") {
+              create_index.lists = atoi(val.c_str());
+            } else if (key == "probes") {
+              create_index.probes = atoi(val.c_str());
+            }
+          }
+        }
+        delete $12;
+      }
+    }
+    ;
+
+with_option_list:
+    ID EQ ID
+    {
+      $$ = new vector<string>;
+      $$->push_back(string($1) + "=" + string($3));
+    }
+    | ID EQ NUMBER
+    {
+      $$ = new vector<string>;
+      $$->push_back(string($1) + "=" + to_string($3));
+    }
+    | ID EQ FLOAT
+    {
+      $$ = new vector<string>;
+      $$->push_back(string($1) + "=" + to_string($3));
+    }
+    | with_option_list COMMA ID EQ ID
+    {
+      $$ = $1;
+      $$->push_back(string($3) + "=" + string($5));
+    }
+    | with_option_list COMMA ID EQ NUMBER
+    {
+      $$ = $1;
+      $$->push_back(string($3) + "=" + to_string($5));
+    }
+    | with_option_list COMMA ID EQ FLOAT
+    {
+      $$ = $1;
+      $$->push_back(string($3) + "=" + to_string($5));
     }
     ;
 
@@ -524,7 +602,7 @@ update_stmt:      /*  update 语句的语法解析树*/
     }
     ;
 select_stmt:        /*  select 语句的语法解析树*/
-    SELECT expression_list FROM rel_list where group_by opt_order_by
+    SELECT expression_list FROM rel_list where group_by opt_order_by opt_limit
     {
       $$ = new ParsedSqlNode(SCF_SELECT);
       if ($2 != nullptr) {
@@ -551,6 +629,8 @@ select_stmt:        /*  select 语句的语法解析树*/
         $$->selection.order_by.swap(*$7);
         delete $7;
       }
+
+      $$->selection.limit_num = $8;
     }
     ;
 calc_stmt:
@@ -839,6 +919,17 @@ opt_asc_desc:
     | DESC
     {
       $$ = 0;
+    }
+    ;
+
+opt_limit:
+    /* empty */
+    {
+      $$ = -1;  // -1 表示无 LIMIT
+    }
+    | LIMIT NUMBER
+    {
+      $$ = $2;
     }
     ;
 

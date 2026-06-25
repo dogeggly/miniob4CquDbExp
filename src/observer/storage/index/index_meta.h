@@ -24,6 +24,22 @@ namespace Json {
 class Value;
 }  // namespace Json
 
+/// 索引类型
+enum class IndexType
+{
+  BPLUS_TREE,  ///< B+ 树索引
+  IVFFLAT,     ///< IVF Flat 向量索引
+};
+
+inline const char *index_type_name(IndexType type)
+{
+  switch (type) {
+    case IndexType::BPLUS_TREE: return "bplus_tree";
+    case IndexType::IVFFLAT: return "ivfflat";
+    default: return "unknown";
+  }
+}
+
 /**
  * @brief 描述一个索引
  * @ingroup Index
@@ -36,10 +52,24 @@ public:
   IndexMeta() = default;
 
   RC init(const char *name, const FieldMeta &field);
+  RC init(const char *name, const FieldMeta &field, IndexType type);
 
 public:
   const char *name() const;
   const char *field() const;
+
+  IndexType index_type() const { return index_type_; }
+  void      set_index_type(IndexType type) { index_type_ = type; }
+
+  /// 向量索引专用属性
+  const char *distance_method() const { return distance_method_.c_str(); }
+  void        set_distance_method(const char *method) { distance_method_ = method; }
+
+  int  lists() const { return lists_; }
+  void set_lists(int lists) { lists_ = lists; }
+
+  int  probes() const { return probes_; }
+  void set_probes(int probes) { probes_ = probes; }
 
   void desc(ostream &os) const;
 
@@ -48,6 +78,12 @@ public:
   static RC from_json(const TableMeta &table, const Json::Value &json_value, IndexMeta &index);
 
 protected:
-  string name_;   // index's name
-  string field_;  // field's name
+  string    name_;         // index's name
+  string    field_;        // field's name
+  IndexType index_type_    = IndexType::BPLUS_TREE;  ///< 索引类型
+
+  // 向量索引专用属性
+  string distance_method_;  ///< 距离度量方法：cosine / dot / euclidean / l2
+  int    lists_ = 1;        ///< IVF 聚类中心数
+  int    probes_ = 1;       ///< 搜索时探测的聚类数
 };

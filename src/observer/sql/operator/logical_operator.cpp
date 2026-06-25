@@ -29,6 +29,8 @@ bool LogicalOperator::can_generate_vectorized_operator(const LogicalOperatorType
   case LogicalOperatorType::DELETE:
   case LogicalOperatorType::INSERT:
   case LogicalOperatorType::ORDER_BY:
+  case LogicalOperatorType::LIMIT:
+  case LogicalOperatorType::VECTOR_INDEX_SCAN:
     bool_ret = false;
     break;
   

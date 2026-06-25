@@ -48,6 +48,8 @@ public:
   const vector<unique_ptr<Expression>> &order_by() const { return order_by_; }
   const vector<bool> &order_by_asc() const { return order_by_asc_; }
 
+  int limit_num() const { return limit_num_; }
+
 private:
   vector<unique_ptr<Expression>> query_expressions_;
   vector<Table *>                tables_;
@@ -55,4 +57,5 @@ private:
   vector<unique_ptr<Expression>> group_by_;
   vector<unique_ptr<Expression>> order_by_;
   vector<bool>                   order_by_asc_;
+  int                            limit_num_ = -1;  ///< LIMIT N, -1 表示无限制
 };

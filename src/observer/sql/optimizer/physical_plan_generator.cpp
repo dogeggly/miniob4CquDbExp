@@ -26,6 +26,7 @@ See the Mulan PSL v2 for more details. */
 #include "sql/operator/group_by_vec_physical_operator.h"
 #include "sql/operator/hash_join_physical_operator.h"
 #include "sql/operator/index_scan_physical_operator.h"
+#include "storage/index/index.h"
 #include "sql/operator/insert_logical_operator.h"
 #include "sql/operator/insert_physical_operator.h"
 #include "sql/operator/join_logical_operator.h"
@@ -41,6 +42,9 @@ See the Mulan PSL v2 for more details. */
 #include "sql/operator/group_by_physical_operator.h"
 #include "sql/operator/order_by_logical_operator.h"
 #include "sql/operator/order_by_physical_operator.h"
+#include "sql/operator/limit_logical_operator.h"
+#include "sql/operator/limit_physical_operator.h"
+#include "sql/operator/vector_index_scan_physical_operator.h"
 #include "sql/operator/hash_group_by_physical_operator.h"
 #include "sql/operator/scalar_group_by_physical_operator.h"
 #include "sql/operator/table_scan_vec_physical_operator.h"
@@ -93,6 +97,10 @@ RC PhysicalPlanGenerator::create(LogicalOperator &logical_operator, unique_ptr<P
       return create_plan(static_cast<OrderByLogicalOperator &>(logical_operator), oper, session);
     } break;
 
+    case LogicalOperatorType::LIMIT: {
+      return create_plan(static_cast<LimitLogicalOperator &>(logical_operator), oper, session);
+    } break;
+
     default: {
       ASSERT(false, "unknown logical operator type");
       return RC::INVALID_ARGUMENT;
@@ -132,6 +140,114 @@ RC PhysicalPlanGenerator::create_plan(TableGetLogicalOperator &table_get_oper, u
   // 看看是否有可以用于索引查找的表达式
   Table *table = table_get_oper.table();
 
+  // --- 1. 检查向量索引 (IVF Flat) ---
+  // 在谓词中寻找 DISTANCE 函数调用，提取向量列和查询向量
+  for (auto &expr : predicates) {
+    // 寻找 COMPARISON 表达式中包含 FUNCTION(DISTANCE) 的情况
+    if (expr->type() == ExprType::COMPARISON) {
+      auto *comp_expr = static_cast<ComparisonExpr *>(expr.get());
+
+      // 检查左侧或右侧是否包含 FUNCTION 表达式
+      for (auto *side : {comp_expr->left().get(), comp_expr->right().get()}) {
+        if (side->type() != ExprType::FUNCTION) continue;
+
+        auto *func_expr = static_cast<FunctionExpr *>(side);
+        if (func_expr->function_type() != FunctionExpr::Type::DISTANCE) continue;
+
+        // 找到了 DISTANCE 表达式，提取向量字段和查询向量
+        const auto &func_children = func_expr->children();
+        if (func_children.size() < 2) continue;
+
+        // 第一个参数应该是字段（向量列）
+        FieldExpr *field_expr = nullptr;
+        if (func_children[0]->type() == ExprType::FIELD) {
+          field_expr = static_cast<FieldExpr *>(func_children[0].get());
+        }
+
+        if (field_expr == nullptr) continue;
+
+        const Field     &field = field_expr->field();
+        const FieldMeta *fm    = field.meta();
+        if (fm->type() != AttrType::VECTORS) continue;
+
+        // 查找该字段上的向量索引
+        Index *vec_index = table->find_index_by_field(field.field_name());
+        if (vec_index == nullptr || !vec_index->is_vector_index()) continue;
+
+        // 提取查询向量（第二个参数）
+        Value query_val;
+        if (func_children[1]->type() == ExprType::VALUE) {
+          query_val = static_cast<ValueExpr *>(func_children[1].get())->get_value();
+        } else {
+          // 尝试提前求值
+          RC rc = func_children[1]->try_get_value(query_val);
+          if (rc != RC::SUCCESS) continue;
+        }
+
+        if (query_val.attr_type() != AttrType::VECTORS) continue;
+
+        // 提取查询向量数据
+        int           dim   = query_val.length();
+        const float  *data  = reinterpret_cast<const float *>(query_val.data());
+        vector<float> query_vec(data, data + dim);
+
+        // 创建向量索引扫描算子
+        auto *vec_scan_oper = new VectorIndexScanPhysicalOperator(
+            table, vec_index, query_vec, 100 /* default limit */);
+
+        vec_scan_oper->set_predicates(std::move(predicates));
+        oper = unique_ptr<PhysicalOperator>(vec_scan_oper);
+        LOG_TRACE("use vector index scan");
+        return RC::SUCCESS;
+      }
+    }
+
+    // 也检查直接的 FUNCTION 表达式（如 CALC 中的 DISTANCE）
+    if (expr->type() == ExprType::FUNCTION) {
+      auto *func_expr = static_cast<FunctionExpr *>(expr.get());
+      if (func_expr->function_type() != FunctionExpr::Type::DISTANCE) continue;
+
+      const auto &func_children = func_expr->children();
+      if (func_children.size() < 2) continue;
+
+      FieldExpr *field_expr = nullptr;
+      if (func_children[0]->type() == ExprType::FIELD) {
+        field_expr = static_cast<FieldExpr *>(func_children[0].get());
+      }
+      if (field_expr == nullptr) continue;
+
+      const Field     &field = field_expr->field();
+      const FieldMeta *fm    = field.meta();
+      if (fm->type() != AttrType::VECTORS) continue;
+
+      Index *vec_index = table->find_index_by_field(field.field_name());
+      if (vec_index == nullptr || !vec_index->is_vector_index()) continue;
+
+      Value query_val;
+      if (func_children[1]->type() == ExprType::VALUE) {
+        query_val = static_cast<ValueExpr *>(func_children[1].get())->get_value();
+      } else {
+        RC rc = func_children[1]->try_get_value(query_val);
+        if (rc != RC::SUCCESS) continue;
+      }
+
+      if (query_val.attr_type() != AttrType::VECTORS) continue;
+
+      int           dim   = query_val.length();
+      const float  *data  = reinterpret_cast<const float *>(query_val.data());
+      vector<float> query_vec(data, data + dim);
+
+      auto *vec_scan_oper = new VectorIndexScanPhysicalOperator(
+          table, vec_index, query_vec, 100);
+
+      vec_scan_oper->set_predicates(std::move(predicates));
+      oper = unique_ptr<PhysicalOperator>(vec_scan_oper);
+      LOG_TRACE("use vector index scan (direct function)");
+      return RC::SUCCESS;
+    }
+  }
+
+  // --- 2. 检查 B+ 树索引 ---
   Index     *index      = nullptr;
   ValueExpr *value_expr = nullptr;
   for (auto &expr : predicates) {
@@ -406,6 +522,32 @@ RC PhysicalPlanGenerator::create_plan(
   }
 
   oper = std::move(order_by_phy_oper);
+  return rc;
+}
+
+RC PhysicalPlanGenerator::create_plan(
+    LimitLogicalOperator &limit_oper, unique_ptr<PhysicalOperator> &oper, Session *session)
+{
+  RC rc = RC::SUCCESS;
+
+  vector<unique_ptr<LogicalOperator>> &child_opers = limit_oper.children();
+  unique_ptr<PhysicalOperator>         child_phy_oper;
+
+  if (!child_opers.empty()) {
+    LogicalOperator *child_oper = child_opers.front().get();
+    rc                          = create(*child_oper, child_phy_oper, session);
+    if (OB_FAIL(rc)) {
+      LOG_WARN("failed to create limit child physical operator. rc=%s", strrc(rc));
+      return rc;
+    }
+  }
+
+  auto limit_phy_oper = make_unique<LimitPhysicalOperator>(limit_oper.limit_num());
+  if (child_phy_oper) {
+    limit_phy_oper->add_child(std::move(child_phy_oper));
+  }
+
+  oper = std::move(limit_phy_oper);
   return rc;
 }
 

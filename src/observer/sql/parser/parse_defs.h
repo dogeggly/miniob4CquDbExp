@@ -103,6 +103,7 @@ struct SelectSqlNode
   vector<ConditionSqlNode>       conditions;   ///< 查询条件，使用AND串联起来多个条件
   vector<unique_ptr<Expression>> group_by;     ///< group by clause
   vector<OrderBySqlNode>         order_by;     ///< order by clause
+  int                            limit_num = -1;  ///< LIMIT N 子句，-1 表示无限制
 };
 
 /**
@@ -203,6 +204,12 @@ struct CreateIndexSqlNode
   string index_name;      ///< Index name
   string relation_name;   ///< Relation name
   string attribute_name;  ///< Attribute name
+
+  /// 向量索引专用选项（CREATE VECTOR INDEX ... WITH (...)）
+  string index_type_str;     ///< 索引类型字符串：ivfflat 等
+  string distance_method;    ///< 距离度量方法：cosine / dot / euclidean / l2
+  int    lists  = 0;         ///< IVF 聚类中心数
+  int    probes = 0;         ///< 搜索时探测的聚类数
 };
 
 /**
@@ -291,6 +298,7 @@ enum SqlCommandFlag
   SCF_DROP_TABLE,
   SCF_ANALYZE_TABLE,
   SCF_CREATE_INDEX,
+  SCF_CREATE_VECTOR_INDEX,
   SCF_DROP_INDEX,
   SCF_SYNC,
   SCF_SHOW_TABLES,

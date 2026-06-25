@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 #include "storage/record/heap_record_scanner.h"
 #include "common/log/log.h"
 #include "storage/index/bplus_tree_index.h"
+#include "storage/index/ivfflat_index.h"
 #include "storage/common/meta_util.h"
 #include "storage/db/db.h"
 
@@ -218,6 +219,90 @@ RC HeapTableEngine::create_index(Trx *trx, const FieldMeta *field_meta, const ch
   table_meta_->swap(new_table_meta);
 
   LOG_INFO("Successfully added a new index (%s) on the table (%s)", index_name, table_meta_->name());
+  return rc;
+}
+
+RC HeapTableEngine::create_vector_index(Trx *trx, const FieldMeta *field_meta, const char *index_name,
+    const char *distance_method, int lists, int probes)
+{
+  if (common::is_blank(index_name) || nullptr == field_meta) {
+    LOG_INFO("Invalid input arguments, table name is %s, index_name is blank or attribute_name is blank",
+        table_meta_->name());
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // 仅支持 VECTOR 类型
+  if (field_meta->type() != AttrType::VECTORS) {
+    LOG_ERROR("Vector index only supports VECTOR type, but got %d", static_cast<int>(field_meta->type()));
+    return RC::INVALID_ARGUMENT;
+  }
+
+  IndexMeta new_index_meta;
+  RC        rc = new_index_meta.init(index_name, *field_meta, IndexType::IVFFLAT);
+  if (rc != RC::SUCCESS) {
+    LOG_INFO("Failed to init IndexMeta in table:%s, index_name:%s, field_name:%s",
+        table_meta_->name(), index_name, field_meta->name());
+    return rc;
+  }
+
+  // 设置向量索引属性
+  if (!common::is_blank(distance_method)) {
+    new_index_meta.set_distance_method(distance_method);
+  }
+  if (lists > 0) {
+    new_index_meta.set_lists(lists);
+  }
+  if (probes > 0) {
+    new_index_meta.set_probes(probes);
+  }
+
+  // 创建 IVF Flat 索引
+  IvfflatIndex *index      = new IvfflatIndex();
+  string        index_file = table_index_file(db_->path().c_str(), table_meta_->name(), index_name);
+
+  rc = index->create(table_, index_file.c_str(), new_index_meta, *field_meta);
+  if (rc != RC::SUCCESS) {
+    delete index;
+    LOG_ERROR("Failed to create ivfflat index. file name=%s, rc=%d:%s", index_file.c_str(), rc, strrc(rc));
+    return rc;
+  }
+
+  indexes_.push_back(index);
+
+  // 更新表元数据
+  TableMeta new_table_meta(*table_meta_);
+  rc = new_table_meta.add_index(new_index_meta);
+  if (rc != RC::SUCCESS) {
+    LOG_ERROR("Failed to add index (%s) on table (%s). error=%d:%s", index_name, table_meta_->name(), rc, strrc(rc));
+    return rc;
+  }
+
+  // 持久化元数据
+  string  tmp_file = table_meta_file(db_->path().c_str(), table_meta_->name()) + ".tmp";
+  fstream fs;
+  fs.open(tmp_file, ios_base::out | ios_base::binary | ios_base::trunc);
+  if (!fs.is_open()) {
+    LOG_ERROR("Failed to open file for write. file name=%s, errmsg=%s", tmp_file.c_str(), strerror(errno));
+    return RC::IOERR_OPEN;
+  }
+  if (new_table_meta.serialize(fs) < 0) {
+    LOG_ERROR("Failed to dump new table meta to file: %s. sys err=%d:%s", tmp_file.c_str(), errno, strerror(errno));
+    return RC::IOERR_WRITE;
+  }
+  fs.close();
+
+  string meta_file = table_meta_file(db_->path().c_str(), table_meta_->name());
+  int    ret       = rename(tmp_file.c_str(), meta_file.c_str());
+  if (ret != 0) {
+    LOG_ERROR("Failed to rename tmp meta file (%s) to normal meta file (%s) while creating index (%s) on table (%s). "
+              "system error=%d:%s",
+        tmp_file.c_str(), meta_file.c_str(), index_name, table_meta_->name(), errno, strerror(errno));
+    return RC::IOERR_WRITE;
+  }
+
+  table_meta_->swap(new_table_meta);
+
+  LOG_INFO("Successfully added a new vector index (%s) on the table (%s)", index_name, table_meta_->name());
   return rc;
 }
 

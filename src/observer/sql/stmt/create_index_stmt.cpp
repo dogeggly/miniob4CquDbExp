@@ -21,7 +21,7 @@ See the Mulan PSL v2 for more details. */
 using namespace std;
 using namespace common;
 
-RC CreateIndexStmt::create(Db *db, const CreateIndexSqlNode &create_index, Stmt *&stmt)
+RC CreateIndexStmt::create(Db *db, const CreateIndexSqlNode &create_index, bool is_vector_command, Stmt *&stmt)
 {
   stmt = nullptr;
 
@@ -53,6 +53,17 @@ RC CreateIndexStmt::create(Db *db, const CreateIndexSqlNode &create_index, Stmt 
     return RC::SCHEMA_INDEX_NAME_REPEAT;
   }
 
-  stmt = new CreateIndexStmt(table, field_meta, create_index.index_name);
+  auto *create_index_stmt = new CreateIndexStmt(table, field_meta, create_index.index_name);
+
+  // 传递向量索引选项：当命令行标记为 CREATE VECTOR INDEX 或有 WITH 选项时，作为向量索引处理
+  if (is_vector_command || !create_index.index_type_str.empty() || !create_index.distance_method.empty() || create_index.lists > 0) {
+    create_index_stmt->set_vector_options(
+        create_index.index_type_str.c_str(),
+        create_index.distance_method.c_str(),
+        create_index.lists,
+        create_index.probes);
+  }
+
+  stmt = create_index_stmt;
   return RC::SUCCESS;
 }

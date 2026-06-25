@@ -37,7 +37,8 @@ bool stmt_type_ddl(StmtType type)
     case StmtType::CREATE_TABLE:
     case StmtType::DROP_TABLE:
     case StmtType::DROP_INDEX:
-    case StmtType::CREATE_INDEX: {
+    case StmtType::CREATE_INDEX:
+    case StmtType::CREATE_VECTOR_INDEX: {
       return true;
     }
     default: {
@@ -65,7 +66,10 @@ RC Stmt::create_stmt(Db *db, ParsedSqlNode &sql_node, Stmt *&stmt)
     }
 
     case SCF_CREATE_INDEX: {
-      return CreateIndexStmt::create(db, sql_node.create_index, stmt);
+      return CreateIndexStmt::create(db, sql_node.create_index, false, stmt);
+    }
+    case SCF_CREATE_VECTOR_INDEX: {
+      return CreateIndexStmt::create(db, sql_node.create_index, true, stmt);
     }
 
     case SCF_CREATE_TABLE: {

@@ -21,16 +21,29 @@ See the Mulan PSL v2 for more details. */
 
 const static Json::StaticString FIELD_NAME("name");
 const static Json::StaticString FIELD_FIELD_NAME("field_name");
+const static Json::StaticString FIELD_INDEX_TYPE("index_type");
+const static Json::StaticString FIELD_DISTANCE_METHOD("distance_method");
+const static Json::StaticString FIELD_LISTS("lists");
+const static Json::StaticString FIELD_PROBES("probes");
+
+static const Json::StaticString INDEX_TYPE_BPLUS_TREE("bplus_tree");
+static const Json::StaticString INDEX_TYPE_IVFFLAT("ivfflat");
 
 RC IndexMeta::init(const char *name, const FieldMeta &field)
+{
+  return init(name, field, IndexType::BPLUS_TREE);
+}
+
+RC IndexMeta::init(const char *name, const FieldMeta &field, IndexType type)
 {
   if (common::is_blank(name)) {
     LOG_ERROR("Failed to init index, name is empty.");
     return RC::INVALID_ARGUMENT;
   }
 
-  name_  = name;
-  field_ = field.name();
+  name_       = name;
+  field_      = field.name();
+  index_type_ = type;
   return RC::SUCCESS;
 }
 
@@ -38,6 +51,23 @@ void IndexMeta::to_json(Json::Value &json_value) const
 {
   json_value[FIELD_NAME]       = name_;
   json_value[FIELD_FIELD_NAME] = field_;
+
+  // 索引类型
+  switch (index_type_) {
+    case IndexType::BPLUS_TREE: json_value[FIELD_INDEX_TYPE] = INDEX_TYPE_BPLUS_TREE; break;
+    case IndexType::IVFFLAT: json_value[FIELD_INDEX_TYPE] = INDEX_TYPE_IVFFLAT; break;
+  }
+
+  // 向量索引属性
+  if (!distance_method_.empty()) {
+    json_value[FIELD_DISTANCE_METHOD] = distance_method_;
+  }
+  if (lists_ > 0) {
+    json_value[FIELD_LISTS] = lists_;
+  }
+  if (probes_ > 0) {
+    json_value[FIELD_PROBES] = probes_;
+  }
 }
 
 RC IndexMeta::from_json(const TableMeta &table, const Json::Value &json_value, IndexMeta &index)
@@ -61,7 +91,37 @@ RC IndexMeta::from_json(const TableMeta &table, const Json::Value &json_value, I
     return RC::SCHEMA_FIELD_MISSING;
   }
 
-  return index.init(name_value.asCString(), *field);
+  // 解析索引类型
+  IndexType idx_type = IndexType::BPLUS_TREE;
+  const Json::Value &type_value = json_value[FIELD_INDEX_TYPE];
+  if (type_value.isString()) {
+    if (type_value == INDEX_TYPE_IVFFLAT) {
+      idx_type = IndexType::IVFFLAT;
+    }
+  }
+
+  RC rc = index.init(name_value.asCString(), *field, idx_type);
+  if (rc != RC::SUCCESS) {
+    return rc;
+  }
+
+  // 解析向量索引属性
+  const Json::Value &dist_value = json_value[FIELD_DISTANCE_METHOD];
+  if (dist_value.isString()) {
+    index.set_distance_method(dist_value.asCString());
+  }
+
+  const Json::Value &lists_value = json_value[FIELD_LISTS];
+  if (lists_value.isInt()) {
+    index.set_lists(lists_value.asInt());
+  }
+
+  const Json::Value &probes_value = json_value[FIELD_PROBES];
+  if (probes_value.isInt()) {
+    index.set_probes(probes_value.asInt());
+  }
+
+  return RC::SUCCESS;
 }
 
 const char *IndexMeta::name() const { return name_.c_str(); }

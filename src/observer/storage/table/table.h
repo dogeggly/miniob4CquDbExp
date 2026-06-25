@@ -95,6 +95,8 @@ public:
 
   // TODO refactor
   RC create_index(Trx *trx, const FieldMeta *field_meta, const char *index_name);
+  RC create_vector_index(Trx *trx, const FieldMeta *field_meta, const char *index_name, const char *distance_method,
+      int lists, int probes);
 
   RC get_record_scanner(RecordScanner *&scanner, Trx *trx, ReadWriteMode mode);
 

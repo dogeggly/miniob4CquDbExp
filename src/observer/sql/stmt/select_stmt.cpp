@@ -157,6 +157,7 @@ RC SelectStmt::create(Db *db, SelectSqlNode &select_sql, Stmt *&stmt)
   select_stmt->group_by_.swap(group_by_expressions);
   select_stmt->order_by_.swap(order_by_expressions);
   select_stmt->order_by_asc_ = std::move(order_by_asc);
-  stmt                      = select_stmt;
+  select_stmt->limit_num_    = select_sql.limit_num;
+  stmt                       = select_stmt;
   return RC::SUCCESS;
 }

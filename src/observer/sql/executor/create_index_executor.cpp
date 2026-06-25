@@ -24,7 +24,7 @@ RC CreateIndexExecutor::execute(SQLStageEvent *sql_event)
 {
   Stmt    *stmt    = sql_event->stmt();
   Session *session = sql_event->session_event()->session();
-  ASSERT(stmt->type() == StmtType::CREATE_INDEX,
+  ASSERT(stmt->type() == StmtType::CREATE_INDEX || stmt->type() == StmtType::CREATE_VECTOR_INDEX,
       "create index executor can not run this command: %d",
       static_cast<int>(stmt->type()));
 
@@ -32,5 +32,15 @@ RC CreateIndexExecutor::execute(SQLStageEvent *sql_event)
 
   Trx   *trx   = session->current_trx();
   Table *table = create_index_stmt->table();
-  return table->create_index(trx, create_index_stmt->field_meta(), create_index_stmt->index_name().c_str());
+
+  if (create_index_stmt->is_vector_index()) {
+    return table->create_vector_index(trx,
+        create_index_stmt->field_meta(),
+        create_index_stmt->index_name().c_str(),
+        create_index_stmt->distance_method(),
+        create_index_stmt->lists(),
+        create_index_stmt->probes());
+  } else {
+    return table->create_index(trx, create_index_stmt->field_meta(), create_index_stmt->index_name().c_str());
+  }
 }

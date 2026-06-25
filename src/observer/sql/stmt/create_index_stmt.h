@@ -33,17 +33,43 @@ public:
 
   virtual ~CreateIndexStmt() = default;
 
-  StmtType type() const override { return StmtType::CREATE_INDEX; }
+  StmtType type() const override
+  {
+    return is_vector_index_ ? StmtType::CREATE_VECTOR_INDEX : StmtType::CREATE_INDEX;
+  }
 
   Table           *table() const { return table_; }
   const FieldMeta *field_meta() const { return field_meta_; }
   const string    &index_name() const { return index_name_; }
 
+  // 向量索引相关属性
+  bool        is_vector_index() const { return is_vector_index_; }
+  const char *distance_method() const { return distance_method_.c_str(); }
+  const char *index_type_str() const { return index_type_str_.c_str(); }
+  int         lists() const { return lists_; }
+  int         probes() const { return probes_; }
+
+  void set_vector_options(const char *index_type_str, const char *distance_method, int lists, int probes)
+  {
+    is_vector_index_ = true;
+    index_type_str_  = index_type_str;
+    distance_method_ = distance_method;
+    lists_           = lists;
+    probes_          = probes;
+  }
+
 public:
-  static RC create(Db *db, const CreateIndexSqlNode &create_index, Stmt *&stmt);
+  static RC create(Db *db, const CreateIndexSqlNode &create_index, bool is_vector_command, Stmt *&stmt);
 
 private:
   Table           *table_      = nullptr;
   const FieldMeta *field_meta_ = nullptr;
   string           index_name_;
+
+  // 向量索引专用属性
+  bool   is_vector_index_ = false;
+  string index_type_str_;
+  string distance_method_;
+  int    lists_  = 0;
+  int    probes_ = 0;
 };
